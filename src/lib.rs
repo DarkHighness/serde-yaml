@@ -169,6 +169,7 @@ pub use crate::value::{from_value, to_value, Index, Number, Sequence, Value};
 
 #[doc(inline)]
 pub use crate::mapping::Mapping;
+pub use crate::span::Spanned;
 
 mod de;
 mod error;
@@ -180,6 +181,7 @@ mod path;
 mod ser;
 pub mod value;
 pub mod with;
+pub mod span;
 
 // Prevent downstream code from implementing the Index trait.
 mod private {

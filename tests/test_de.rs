@@ -8,8 +8,8 @@
 
 use indoc::indoc;
 use serde_derive::Deserialize;
-use serde_yaml::{Deserializer, Number, Value};
-use std::collections::BTreeMap;
+use serde_yaml::{Deserializer, Number, Value, Spanned};
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Debug;
 
 fn test_de<T>(yaml: &str, expected: &T)
@@ -714,4 +714,28 @@ fn test_parse_number() {
 
     let err = " 1 ".parse::<Number>().unwrap_err();
     assert_eq!(err.to_string(), "failed to parse YAML number");
+}
+
+#[test]
+fn test_spanned() {
+    #[derive(Debug, Deserialize, PartialEq)]
+    struct Data {
+        value: serde_yaml::Spanned<String>,
+    }
+
+    let yaml = indoc! {"
+        value: foo
+    "};
+
+    let expected = Data {
+        value: Spanned {
+            value: "foo".to_owned(),
+            index: 7,
+            line: 0,
+            column: 7,
+            len: 4
+        },
+    };
+
+    test_de(yaml, &expected);
 }

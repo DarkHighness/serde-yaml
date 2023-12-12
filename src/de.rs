@@ -4,9 +4,10 @@ use crate::libyaml::parser::{MappingStart, Scalar, ScalarStyle, SequenceStart};
 use crate::libyaml::tag::Tag;
 use crate::loader::{Document, Loader};
 use crate::path::Path;
-use serde::de::value::StrDeserializer;
+use serde::de::value::{BorrowedStrDeserializer, StrDeserializer};
 use serde::de::{
-    self, Deserialize, DeserializeOwned, DeserializeSeed, Expected, IgnoredAny, Unexpected, Visitor,
+    self, Deserialize, DeserializeOwned, DeserializeSeed, Expected, IgnoredAny, IntoDeserializer,
+    Unexpected, Visitor,
 };
 use std::fmt;
 use std::io;
@@ -566,6 +567,25 @@ impl<'de, 'document> DeserializerFromEvents<'de, 'document> {
         Ok(value)
     }
 
+    fn visit_spanned<V>(&mut self, visitor: V, mark: Mark) -> Result<V::Value>
+    where
+        V: Visitor<'de>,
+    {
+        let value = self.recursion_check(mark, |de| {
+            let mut map = SpannedMapAccess {
+                de,
+                marker: mark,
+                state: SpannedMapAccessState::IndexKey,
+            };
+
+            let value = visitor.visit_map(&mut map)?;
+
+            Ok(value)
+        })?;
+
+        Ok(value)
+    }
+
     fn end_sequence(&mut self, len: usize) -> Result<()> {
         let total = {
             let mut seq = SeqAccess {
@@ -737,6 +757,115 @@ impl<'de, 'document, 'map> de::MapAccess<'de> for MapAccess<'de, 'document, 'map
         };
         seed.deserialize(&mut value_de)
     }
+}
+
+struct SpannedMapAccess<'de, 'document, 'map> {
+    de: &'map mut DeserializerFromEvents<'de, 'document>,
+    marker: Mark,
+    state: SpannedMapAccessState,
+}
+
+impl<'de, 'document, 'map> de::MapAccess<'de> for SpannedMapAccess<'de, 'document, 'map> {
+    type Error = Error;
+
+    fn next_key_seed<K>(
+        &mut self,
+        seed: K,
+    ) -> std::prelude::v1::Result<Option<K::Value>, Self::Error>
+    where
+        K: DeserializeSeed<'de>,
+    {
+        match self.state {
+            SpannedMapAccessState::IndexKey => {
+                self.state = SpannedMapAccessState::DeserializeIndex;
+                seed.deserialize(BorrowedStrDeserializer::new(crate::span::INDEX))
+                    .map(Some)
+            }
+            SpannedMapAccessState::RowKey => {
+                self.state = SpannedMapAccessState::DeserializeRow;
+                seed.deserialize(BorrowedStrDeserializer::new(crate::span::ROW))
+                    .map(Some)
+            }
+            SpannedMapAccessState::ColumnKey => {
+                self.state = SpannedMapAccessState::DeserializeColumn;
+                seed.deserialize(BorrowedStrDeserializer::new(crate::span::COLUMN))
+                    .map(Some)
+            }
+            SpannedMapAccessState::ValueKey => {
+                self.state = SpannedMapAccessState::DeserializeValue;
+                seed.deserialize(BorrowedStrDeserializer::new(crate::span::VALUE))
+                    .map(Some)
+            }
+            SpannedMapAccessState::LenKey => {
+                self.state = SpannedMapAccessState::DeserializeLen;
+                seed.deserialize(BorrowedStrDeserializer::new(crate::span::LEN))
+                    .map(Some)
+            }
+            SpannedMapAccessState::Done => Ok(None),
+            other => unreachable!("Invalid state: {:?}", other),
+        }
+    }
+
+    fn next_value_seed<V>(&mut self, seed: V) -> std::prelude::v1::Result<V::Value, Self::Error>
+    where
+        V: DeserializeSeed<'de>,
+    {
+        match self.state {
+            SpannedMapAccessState::DeserializeIndex => {
+                self.state = SpannedMapAccessState::RowKey;
+                seed.deserialize(self.marker.index().into_deserializer())
+            }
+            SpannedMapAccessState::DeserializeRow => {
+                self.state = SpannedMapAccessState::ColumnKey;
+                seed.deserialize(self.marker.line().into_deserializer())
+            }
+            SpannedMapAccessState::DeserializeColumn => {
+                self.state = SpannedMapAccessState::ValueKey;
+                seed.deserialize(self.marker.column().into_deserializer())
+            }
+            SpannedMapAccessState::DeserializeValue => {
+                self.state = SpannedMapAccessState::LenKey;
+                let mut value_de = DeserializerFromEvents {
+                    document: self.de.document,
+                    jumpcount: self.de.jumpcount,
+                    current_enum: self.de.current_enum,
+                    pos: self.de.pos,
+                    path: self.de.path,
+                    remaining_depth: self.de.remaining_depth,
+                };
+                seed.deserialize(&mut value_de)
+            }
+            SpannedMapAccessState::DeserializeLen => {
+                self.state = SpannedMapAccessState::Done;
+                let event = self.de.peek_event_mark();
+                let new_pos = match event {
+                    Ok((_, marker)) => marker.index() as i64,
+                    Err(_) => self.marker.index() as i64,
+                };
+                let old_pos = self.marker.index() as i64;
+
+                let len = (new_pos - old_pos) as usize;
+
+                seed.deserialize(len.into_deserializer())
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+enum SpannedMapAccessState {
+    IndexKey,
+    DeserializeIndex,
+    RowKey,
+    DeserializeRow,
+    ColumnKey,
+    DeserializeColumn,
+    ValueKey,
+    DeserializeValue,
+    LenKey,
+    DeserializeLen,
+    Done,
 }
 
 struct EnumAccess<'de, 'document, 'variant> {
@@ -1689,13 +1818,19 @@ impl<'de, 'document> de::Deserializer<'de> for &mut DeserializerFromEvents<'de, 
 
     fn deserialize_struct<V>(
         self,
-        _name: &'static str,
-        _fields: &'static [&'static str],
+        name: &'static str,
+        fields: &'static [&'static str],
         visitor: V,
     ) -> Result<V::Value>
     where
         V: Visitor<'de>,
     {
+        if name == crate::span::NAME && fields == crate::span::FIELDS {
+            let (_, mark) = self.peek_event_mark()?;
+            let value = self.visit_spanned(visitor, mark);
+            return value;
+        }
+
         self.deserialize_map(visitor)
     }
 
