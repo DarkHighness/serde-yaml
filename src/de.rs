@@ -813,15 +813,15 @@ impl<'de, 'document, 'map> de::MapAccess<'de> for SpannedMapAccess<'de, 'documen
         match self.state {
             SpannedMapAccessState::DeserializeIndex => {
                 self.state = SpannedMapAccessState::RowKey;
-                seed.deserialize(self.marker.index().into_deserializer())
+                seed.deserialize((self.marker.index() + 1).into_deserializer())
             }
             SpannedMapAccessState::DeserializeRow => {
                 self.state = SpannedMapAccessState::ColumnKey;
-                seed.deserialize(self.marker.line().into_deserializer())
+                seed.deserialize((self.marker.line() + 1).into_deserializer())
             }
             SpannedMapAccessState::DeserializeColumn => {
                 self.state = SpannedMapAccessState::ValueKey;
-                seed.deserialize(self.marker.column().into_deserializer())
+                seed.deserialize((self.marker.column() + 1).into_deserializer())
             }
             SpannedMapAccessState::DeserializeValue => {
                 self.state = SpannedMapAccessState::LenKey;
